@@ -23,3 +23,5 @@ bash install.sh
 ```
 
 前提是已经运行过 deepseek-harness 仓库里的 `install-dsh-service.sh`，生成 `~/Library/LaunchAgents/com.dsh.web.plist`。如果尚未安装，菜单仍会显示“未安装 LaunchAgent”，不会执行危险的猜测命令。
+
+<img width="193" height="251" alt="deepseek-harness-menubar" src="https://github.com/user-attachments/assets/3a4d36f0-97c0-44cd-b822-0088d2d95eb8" />
