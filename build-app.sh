@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="$ROOT/DeepSeekHarnessMenuBar.app"
 BIN="$APP/Contents/MacOS/DeepSeekHarnessMenuBar"
+VERSION="${DSH_VERSION:-1.0.0}"
 
 command -v magick >/dev/null 2>&1 || {
   echo "Missing dependency: ImageMagick (magick)" >&2
@@ -21,7 +22,7 @@ xcrun clang "$ROOT/Sources/main.m" \
   -O \
   -o "$BIN"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -32,8 +33,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>AppIcon.png</string>
   <key>CFBundleName</key><string>DeepSeek Harness Menu Bar</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSUIElement</key><true/>
 </dict>

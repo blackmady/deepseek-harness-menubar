@@ -22,6 +22,24 @@ open DeepSeekHarnessMenuBar.app
 bash install.sh
 ```
 
+## 检查更新和安装更新
+
+菜单栏中的“检查更新”会读取 GitHub Releases：
+
+```text
+https://github.com/blackmady/deepseek-harness-menubar/releases
+```
+
+发布新版本时，请把构建出的 ZIP 作为 Release Asset 上传。推荐命名为：
+
+```bash
+bash package-release.sh 1.1.0
+```
+
+将生成的 `DeepSeekHarnessMenuBar-v1.1.0.zip` 上传到 `v1.1.0` Release 的 Assets 区域。
+
+应用会优先寻找名称中包含 `DeepSeekHarnessMenuBar` 的 ZIP，下载后校验 Bundle ID、版本号、可执行文件和代码签名，再替换当前应用并自动重新打开。服务本身和 `com.dsh.web` LaunchAgent 不会被修改。
+
 前提是已经运行过 deepseek-harness 仓库里的 `install-dsh-service.sh`，生成 `~/Library/LaunchAgents/com.dsh.web.plist`。如果尚未安装，菜单仍会显示“未安装 LaunchAgent”，不会执行危险的猜测命令。
 
 <img width="193" height="251" alt="deepseek-harness-menubar" src="https://github.com/user-attachments/assets/3a4d36f0-97c0-44cd-b822-0088d2d95eb8" />

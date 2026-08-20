@@ -1,5 +1,6 @@
 .build/
 .DS_Store
 DeepSeekHarnessMenuBar.app/
+*.zip
 
 # Local build products can be regenerated with build-app.sh.
