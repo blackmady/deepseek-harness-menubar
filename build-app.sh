@@ -18,6 +18,7 @@ magick -background none "$ROOT/Resources/menu-icon.svg" -resize 38x38 -depth 8 -
 
 xcrun clang "$ROOT/Sources/main.m" \
   -fobjc-arc \
+  -framework CFNetwork \
   -framework Cocoa \
   -O \
   -o "$BIN"

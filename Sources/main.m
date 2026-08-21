@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#import <CFNetwork/CFNetwork.h>
 
 static NSString *const DSHServiceLabel = @"com.dsh.web";
 static const NSInteger DSHServicePort = 3080;
@@ -146,6 +147,7 @@ static DSHCommandResult *DSHRunCommand(NSString *executable, NSArray<NSString *>
 @property(nonatomic, copy) NSString *latestVersion;
 @property(nonatomic, strong) NSURL *latestDownloadURL;
 @property(nonatomic, copy) NSString *latestReleaseURL;
+@property(nonatomic, copy) NSString *proxyDescription;
 @end
 
 @implementation DSHAppDelegate
@@ -157,6 +159,12 @@ static DSHCommandResult *DSHRunCommand(NSString *executable, NSArray<NSString *>
     NSURLSessionConfiguration *sessionConfiguration = [NSURLSessionConfiguration defaultSessionConfiguration];
     sessionConfiguration.timeoutIntervalForRequest = 15;
     sessionConfiguration.timeoutIntervalForResource = 120;
+    NSString *proxyDescription = nil;
+    NSDictionary *proxyConfiguration = [self systemProxyConfigurationForURL:[NSURL URLWithString:DSHGitHubLatestReleaseURL] description:&proxyDescription];
+    self.proxyDescription = proxyDescription;
+    if (proxyConfiguration.count > 0) {
+        sessionConfiguration.connectionProxyDictionary = proxyConfiguration;
+    }
     self.updateSession = [NSURLSession sessionWithConfiguration:sessionConfiguration];
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
 
@@ -357,19 +365,79 @@ static DSHCommandResult *DSHRunCommand(NSString *executable, NSArray<NSString *>
     [request setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
     NSURLSessionDataTask *task = [self.updateSession dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error) {
-            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
+            NSString *message = [NSString stringWithFormat:@"网络请求失败：%@\n使用网络：%@", error.localizedDescription, self.proxyDescription ?: @"系统默认网络设置"];
+            NSError *networkError = [NSError errorWithDomain:@"DeepSeekHarnessMenuBar" code:error.code userInfo:@{NSLocalizedDescriptionKey: message}];
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, networkError); });
+            return;
+        }
+        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+        NSInteger statusCode = httpResponse.statusCode;
+        NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+        if (statusCode < 200 || statusCode >= 300) {
+            NSDictionary *errorJSON = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSString *githubMessage = [errorJSON isKindOfClass:[NSDictionary class]] ? errorJSON[@"message"] : nil;
+            NSString *detail = githubMessage.length > 0 ? githubMessage : (body.length > 500 ? [body substringToIndex:500] : body);
+            NSString *hint = statusCode == 404
+                ? @"请确认仓库存在，并且至少有一个已发布的 Release（不能只有 Draft）。"
+                : statusCode == 403
+                    ? @"可能是 GitHub API 限流或访问权限问题。"
+                    : @"";
+            NSString *message = [NSString stringWithFormat:@"GitHub 返回 HTTP %ld。%@ %@\n使用网络：%@", (long)statusCode, detail.length > 0 ? [NSString stringWithFormat:@"服务器信息：%@。", detail] : @"", hint, self.proxyDescription ?: @"系统默认网络设置"];
+            NSError *httpError = [NSError errorWithDomain:@"DeepSeekHarnessMenuBar" code:statusCode userInfo:@{NSLocalizedDescriptionKey: message}];
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, httpError); });
             return;
         }
         NSError *jsonError = nil;
         NSDictionary *release = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
         if (![release isKindOfClass:[NSDictionary class]] || !release[@"tag_name"]) {
-            NSError *formatError = [NSError errorWithDomain:@"DeepSeekHarnessMenuBar" code:1 userInfo:@{NSLocalizedDescriptionKey: jsonError.localizedDescription ?: @"GitHub Release 响应格式不正确"}];
+            NSString *detail = body.length > 500 ? [body substringToIndex:500] : body;
+            NSString *message = [NSString stringWithFormat:@"GitHub Release 响应格式不正确：%@\n返回内容：%@\n使用网络：%@", jsonError.localizedDescription ?: @"缺少 tag_name", detail, self.proxyDescription ?: @"系统默认网络设置"];
+            NSError *formatError = [NSError errorWithDomain:@"DeepSeekHarnessMenuBar" code:1 userInfo:@{NSLocalizedDescriptionKey: message}];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, formatError); });
             return;
         }
         dispatch_async(dispatch_get_main_queue(), ^{ completion(release, nil); });
     }];
     [task resume];
+}
+
+- (NSDictionary *)systemProxyConfigurationForURL:(NSURL *)url description:(NSString **)description {
+    NSDictionary *settings = CFBridgingRelease(CFNetworkCopySystemProxySettings());
+    NSArray *proxies = CFBridgingRelease(CFNetworkCopyProxiesForURL((__bridge CFURLRef)url, (__bridge CFDictionaryRef)settings));
+    NSMutableDictionary *configuration = [NSMutableDictionary dictionary];
+    NSString *selectedDescription = @"系统直连（未发现显式 HTTP/SOCKS 代理）";
+
+    for (NSDictionary *proxy in proxies) {
+        NSString *type = proxy[(__bridge NSString *)kCFProxyTypeKey];
+        if ([type isEqualToString:(__bridge NSString *)kCFProxyTypeNone]) {
+            selectedDescription = @"系统直连";
+            break;
+        }
+        NSString *host = proxy[(__bridge NSString *)kCFProxyHostNameKey];
+        NSNumber *port = proxy[(__bridge NSString *)kCFProxyPortNumberKey];
+        if (host.length == 0 || port.integerValue <= 0) continue;
+
+        if ([type isEqualToString:(__bridge NSString *)kCFProxyTypeHTTP] || [type isEqualToString:(__bridge NSString *)kCFProxyTypeHTTPS]) {
+            configuration[(__bridge NSString *)kCFNetworkProxiesHTTPEnable] = @YES;
+            configuration[(__bridge NSString *)kCFNetworkProxiesHTTPProxy] = host;
+            configuration[(__bridge NSString *)kCFNetworkProxiesHTTPPort] = port;
+            configuration[(__bridge NSString *)kCFNetworkProxiesHTTPSEnable] = @YES;
+            configuration[(__bridge NSString *)kCFNetworkProxiesHTTPSProxy] = host;
+            configuration[(__bridge NSString *)kCFNetworkProxiesHTTPSPort] = port;
+            selectedDescription = [NSString stringWithFormat:@"系统代理 %@:%@", host, port];
+            break;
+        }
+        if ([type isEqualToString:(__bridge NSString *)kCFProxyTypeSOCKS]) {
+            configuration[(__bridge NSString *)kCFNetworkProxiesSOCKSEnable] = @YES;
+            configuration[(__bridge NSString *)kCFNetworkProxiesSOCKSProxy] = host;
+            configuration[(__bridge NSString *)kCFNetworkProxiesSOCKSPort] = port;
+            selectedDescription = [NSString stringWithFormat:@"系统 SOCKS 代理 %@:%@", host, port];
+            break;
+        }
+    }
+
+    if (description) *description = selectedDescription;
+    return configuration;
 }
 
 - (void)downloadAndInstallUpdate:(NSURL *)downloadURL {

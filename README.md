@@ -24,7 +24,7 @@ bash install.sh
 
 ## 检查更新和安装更新
 
-菜单栏中的“检查更新”会读取 GitHub Releases：
+菜单栏中的“检查更新”会读取 GitHub Releases，并使用 macOS 当前的系统代理/PAC 设置访问 GitHub。若系统没有代理，会自动直连。
 
 ```text
 https://github.com/blackmady/deepseek-harness-menubar/releases
