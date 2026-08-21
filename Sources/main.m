@@ -4,6 +4,8 @@
 static NSString *const DSHServiceLabel = @"com.dsh.web";
 static const NSInteger DSHServicePort = 3080;
 static NSString *const DSHGitHubLatestReleaseURL = @"https://api.github.com/repos/blackmady/deepseek-harness-menubar/releases/latest";
+static NSString *const DSHHarnessPackage = @"@deepseek-ai/dsh";
+static NSString *const DSHHarnessRuntimeDirectory = @"~/.dsh/runtime";
 
 typedef NS_ENUM(NSInteger, DSHServiceState) {
     DSHServiceStateRunning,
@@ -21,12 +23,21 @@ typedef NS_ENUM(NSInteger, DSHServiceState) {
 @implementation DSHCommandResult
 @end
 
+static DSHCommandResult *DSHRunCommandWithEnvironment(NSString *executable, NSArray<NSString *> *arguments, NSDictionary<NSString *, NSString *> *extraEnvironment);
+
 static DSHCommandResult *DSHRunCommand(NSString *executable, NSArray<NSString *> *arguments) {
+    return DSHRunCommandWithEnvironment(executable, arguments, nil);
+}
+
+static DSHCommandResult *DSHRunCommandWithEnvironment(NSString *executable, NSArray<NSString *> *arguments, NSDictionary<NSString *, NSString *> *extraEnvironment) {
     NSTask *task = [[NSTask alloc] init];
     NSPipe *stdoutPipe = [NSPipe pipe];
     NSPipe *stderrPipe = [NSPipe pipe];
     task.executableURL = [NSURL fileURLWithPath:executable];
     task.arguments = arguments;
+    NSMutableDictionary *environment = [NSProcessInfo.processInfo.environment mutableCopy];
+    [environment addEntriesFromDictionary:extraEnvironment ?: @{}];
+    task.environment = environment;
     task.standardOutput = stdoutPipe;
     task.standardError = stderrPipe;
 
@@ -140,6 +151,8 @@ static DSHCommandResult *DSHRunCommand(NSString *executable, NSArray<NSString *>
 @property(nonatomic, strong) NSMenuItem *stopItem;
 @property(nonatomic, strong) NSMenuItem *checkUpdateItem;
 @property(nonatomic, strong) NSMenuItem *updateItem;
+@property(nonatomic, strong) NSMenuItem *checkHarnessUpdateItem;
+@property(nonatomic, strong) NSMenuItem *updateHarnessItem;
 @property(nonatomic, strong) DSHServiceController *service;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, strong) NSURLSession *updateSession;
@@ -148,6 +161,8 @@ static DSHCommandResult *DSHRunCommand(NSString *executable, NSArray<NSString *>
 @property(nonatomic, strong) NSURL *latestDownloadURL;
 @property(nonatomic, copy) NSString *latestReleaseURL;
 @property(nonatomic, copy) NSString *proxyDescription;
+@property(nonatomic, copy) NSString *harnessCurrentVersion;
+@property(nonatomic, copy) NSString *harnessLatestVersion;
 @end
 
 @implementation DSHAppDelegate
@@ -156,6 +171,7 @@ static DSHCommandResult *DSHRunCommand(NSString *executable, NSArray<NSString *>
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     self.service = [[DSHServiceController alloc] init];
     self.currentVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.0";
+    self.harnessCurrentVersion = [self installedHarnessVersion] ?: @"未安装";
     NSURLSessionConfiguration *sessionConfiguration = [NSURLSessionConfiguration defaultSessionConfiguration];
     sessionConfiguration.timeoutIntervalForRequest = 15;
     sessionConfiguration.timeoutIntervalForResource = 120;
@@ -201,6 +217,11 @@ static DSHCommandResult *DSHRunCommand(NSString *executable, NSArray<NSString *>
     self.updateItem.enabled = NO;
     [menu addItem:self.checkUpdateItem];
     [menu addItem:self.updateItem];
+    self.checkHarnessUpdateItem = [self item:[NSString stringWithFormat:@"检查 Harness 更新（当前 %@）", self.harnessCurrentVersion] selector:@selector(checkHarnessForUpdates:)];
+    self.updateHarnessItem = [self item:@"更新 DeepSeek Harness（请先检查）" selector:@selector(updateHarness:)];
+    self.updateHarnessItem.enabled = NO;
+    [menu addItem:self.checkHarnessUpdateItem];
+    [menu addItem:self.updateHarnessItem];
     [menu addItem:NSMenuItem.separatorItem];
     [menu addItem:[self item:@"退出菜单栏控制器" selector:@selector(quit:)]];
     self.statusItem.menu = menu;
@@ -274,16 +295,53 @@ static DSHCommandResult *DSHRunCommand(NSString *executable, NSArray<NSString *>
     [self.service stop:^(NSError *error) { [weakSelf finishOperation:@"停止" error:error]; }];
 }
 
-- (BOOL)isVersion:(NSString *)candidate newerThan:(NSString *)current {
-    NSArray<NSString *> *candidateParts = [[candidate stringByReplacingOccurrencesOfString:@"v" withString:@""] componentsSeparatedByString:@"."];
-    NSArray<NSString *> *currentParts = [[current stringByReplacingOccurrencesOfString:@"v" withString:@""] componentsSeparatedByString:@"."];
-    NSUInteger count = MAX(candidateParts.count, currentParts.count);
-    for (NSUInteger index = 0; index < count; index++) {
-        NSInteger candidateNumber = index < candidateParts.count ? [candidateParts[index] integerValue] : 0;
-        NSInteger currentNumber = index < currentParts.count ? [currentParts[index] integerValue] : 0;
-        if (candidateNumber != currentNumber) return candidateNumber > currentNumber;
+- (NSString *)installedHarnessVersion {
+    NSString *packagePath = [[DSHHarnessRuntimeDirectory stringByExpandingTildeInPath] stringByAppendingPathComponent:@"node_modules/@deepseek-ai/dsh/package.json"];
+    NSData *data = [NSData dataWithContentsOfFile:packagePath];
+    NSDictionary *package = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    return [package isKindOfClass:[NSDictionary class]] ? package[@"version"] : nil;
+}
+
+- (NSComparisonResult)compareVersion:(NSString *)left to:(NSString *)right {
+    NSString *(^normalize)(NSString *) = ^NSString *(NSString *value) {
+        return [value hasPrefix:@"v"] ? [value substringFromIndex:1] : value;
+    };
+    NSArray<NSString *> *(^parts)(NSString *) = ^NSArray *(NSString *value) {
+        return [normalize(value) componentsSeparatedByString:@"-"];
+    };
+    NSArray<NSString *> *leftParts = parts(left);
+    NSArray<NSString *> *rightParts = parts(right);
+    NSArray<NSString *> *leftCore = [leftParts.firstObject componentsSeparatedByString:@"."];
+    NSArray<NSString *> *rightCore = [rightParts.firstObject componentsSeparatedByString:@"."];
+    for (NSUInteger index = 0; index < MAX(leftCore.count, rightCore.count); index++) {
+        NSInteger leftNumber = index < leftCore.count ? [leftCore[index] integerValue] : 0;
+        NSInteger rightNumber = index < rightCore.count ? [rightCore[index] integerValue] : 0;
+        if (leftNumber != rightNumber) return leftNumber < rightNumber ? NSOrderedAscending : NSOrderedDescending;
     }
-    return NO;
+    NSString *leftPre = leftParts.count > 1 ? leftParts[1] : nil;
+    NSString *rightPre = rightParts.count > 1 ? rightParts[1] : nil;
+    if (!leftPre && !rightPre) return NSOrderedSame;
+    if (!leftPre) return NSOrderedDescending;
+    if (!rightPre) return NSOrderedAscending;
+    NSArray<NSString *> *leftIdentifiers = [leftPre componentsSeparatedByString:@"."];
+    NSArray<NSString *> *rightIdentifiers = [rightPre componentsSeparatedByString:@"."];
+    for (NSUInteger index = 0; index < MAX(leftIdentifiers.count, rightIdentifiers.count); index++) {
+        if (index >= leftIdentifiers.count) return NSOrderedAscending;
+        if (index >= rightIdentifiers.count) return NSOrderedDescending;
+        NSString *leftIdentifier = leftIdentifiers[index];
+        NSString *rightIdentifier = rightIdentifiers[index];
+        BOOL leftNumeric = leftIdentifier.integerValue == leftIdentifier.doubleValue && leftIdentifier.length > 0;
+        BOOL rightNumeric = rightIdentifier.integerValue == rightIdentifier.doubleValue && rightIdentifier.length > 0;
+        if (leftNumeric && rightNumeric && leftIdentifier.integerValue != rightIdentifier.integerValue) return leftIdentifier.integerValue < rightIdentifier.integerValue ? NSOrderedAscending : NSOrderedDescending;
+        if (leftNumeric != rightNumeric) return leftNumeric ? NSOrderedAscending : NSOrderedDescending;
+        NSComparisonResult result = [leftIdentifier compare:rightIdentifier options:NSCaseInsensitiveSearch];
+        if (result != NSOrderedSame) return result;
+    }
+    return NSOrderedSame;
+}
+
+- (BOOL)isVersion:(NSString *)candidate newerThan:(NSString *)current {
+    return [self compareVersion:candidate to:current] == NSOrderedDescending;
 }
 
 - (void)checkForUpdates:(id)sender {
@@ -333,6 +391,153 @@ static DSHCommandResult *DSHRunCommand(NSString *executable, NSArray<NSString *>
             [self showAlert:@"已是最新版本" message:[NSString stringWithFormat:@"当前版本 v%@ 已经是最新版本。", self.currentVersion] style:NSAlertStyleInformational];
         }
     }];
+}
+
+- (NSString *)npmExecutable {
+    NSMutableArray<NSString *> *candidates = [NSMutableArray arrayWithArray:@[
+        @"/opt/homebrew/bin/npm",
+        @"/usr/local/bin/npm",
+        @"~/.volta/bin/npm",
+        @"~/.asdf/shims/npm"
+    ]];
+    NSString *nvmDirectory = [@"~/.nvm/versions/node" stringByExpandingTildeInPath];
+    NSArray<NSString *> *nodeVersions = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:nvmDirectory error:nil];
+    for (NSString *version in nodeVersions) {
+        [candidates addObject:[nvmDirectory stringByAppendingPathComponent:[version stringByAppendingPathComponent:@"bin/npm"]]];
+    }
+    for (NSString *candidate in candidates) {
+        NSString *expanded = [candidate stringByExpandingTildeInPath];
+        if ([[NSFileManager defaultManager] isExecutableFileAtPath:expanded]) return expanded;
+    }
+    return nil;
+}
+
+- (NSDictionary<NSString *, NSString *> *)npmEnvironment {
+    NSString *npm = [self npmExecutable];
+    if (!npm) return @{};
+    NSString *npmDirectory = [npm stringByDeletingLastPathComponent];
+    NSMutableDictionary *environment = [NSMutableDictionary dictionary];
+    NSString *path = NSProcessInfo.processInfo.environment[@"PATH"] ?: @"/usr/bin:/bin";
+    environment[@"PATH"] = [NSString stringWithFormat:@"%@:%@", npmDirectory, path];
+    environment[@"NPM_CONFIG_AUDIT"] = @"false";
+    environment[@"NPM_CONFIG_FUND"] = @"false";
+
+    NSString *proxyDescription = nil;
+    NSDictionary *proxy = [self systemProxyConfigurationForURL:[NSURL URLWithString:@"https://registry.npmjs.org/"] description:&proxyDescription];
+    self.proxyDescription = proxyDescription;
+    NSString *proxyHost = proxy[(__bridge NSString *)kCFNetworkProxiesHTTPProxy];
+    NSNumber *proxyPort = proxy[(__bridge NSString *)kCFNetworkProxiesHTTPPort];
+    if (proxyHost.length > 0 && proxyPort.integerValue > 0) {
+        NSString *proxyURL = [NSString stringWithFormat:@"http://%@:%@", proxyHost, proxyPort];
+        environment[@"HTTP_PROXY"] = proxyURL;
+        environment[@"HTTPS_PROXY"] = proxyURL;
+        environment[@"http_proxy"] = proxyURL;
+        environment[@"https_proxy"] = proxyURL;
+        environment[@"NPM_CONFIG_PROXY"] = proxyURL;
+        environment[@"NPM_CONFIG_HTTPS_PROXY"] = proxyURL;
+    }
+    return environment;
+}
+
+- (void)checkHarnessForUpdates:(id)sender {
+    NSString *npm = [self npmExecutable];
+    if (!npm) {
+        [self showAlert:@"无法检查 Harness 更新" message:@"没有找到 npm。请确认 Node.js/npm 已安装，并且当前用户的 npm 可执行文件在标准路径中。" style:NSAlertStyleWarning];
+        return;
+    }
+    self.checkHarnessUpdateItem.enabled = NO;
+    self.checkHarnessUpdateItem.title = @"正在检查 Harness 更新…";
+    NSDictionary *environment = [self npmEnvironment];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        DSHCommandResult *result = DSHRunCommandWithEnvironment(npm, @[@"view", DSHHarnessPackage, @"version", @"--json", @"--silent"], environment);
+        NSString *latest = [result.output stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([latest hasPrefix:@"\""] && [latest hasSuffix:@"\""] && latest.length >= 2) latest = [latest substringWithRange:NSMakeRange(1, latest.length - 2)];
+        NSError *error = nil;
+        if (result.status != 0 || latest.length == 0 || [latest containsString:@"{"]) {
+            NSString *message = result.error.length > 0 ? result.error : (result.output.length > 0 ? result.output : @"npm 没有返回版本号");
+            error = [NSError errorWithDomain:@"DeepSeekHarnessMenuBar" code:result.status userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"npm 检查更新失败：%@\n使用网络：%@", message, self.proxyDescription ?: @"系统默认网络设置"]}];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.checkHarnessUpdateItem.enabled = YES;
+            self.checkHarnessUpdateItem.title = [NSString stringWithFormat:@"检查 Harness 更新（当前 %@）", self.harnessCurrentVersion];
+            if (error) {
+                [self showAlert:@"检查 Harness 更新失败" message:error.localizedDescription style:NSAlertStyleWarning];
+            } else if ([self isVersion:latest newerThan:self.harnessCurrentVersion]) {
+                self.harnessLatestVersion = latest;
+                self.updateHarnessItem.title = [NSString stringWithFormat:@"更新 DeepSeek Harness 到 v%@", latest];
+                self.updateHarnessItem.enabled = YES;
+                [self showAlert:@"发现 Harness 新版本" message:[NSString stringWithFormat:@"当前版本：%@\n最新版本：%@\n\n点击菜单中的“更新 DeepSeek Harness”开始升级。", self.harnessCurrentVersion, latest] style:NSAlertStyleInformational];
+            } else {
+                self.harnessLatestVersion = nil;
+                self.updateHarnessItem.title = @"Harness 已是最新版本";
+                self.updateHarnessItem.enabled = NO;
+                [self showAlert:@"Harness 已是最新版本" message:[NSString stringWithFormat:@"当前版本 %@ 已是 npm registry 返回的最新版本。", self.harnessCurrentVersion] style:NSAlertStyleInformational];
+            }
+        });
+    });
+}
+
+- (void)updateHarness:(id)sender {
+    if (!self.harnessLatestVersion.length) {
+        [self checkHarnessForUpdates:nil];
+        return;
+    }
+    NSAlert *confirmation = [[NSAlert alloc] init];
+    confirmation.alertStyle = NSAlertStyleInformational;
+    confirmation.messageText = [NSString stringWithFormat:@"升级 DeepSeek Harness 到 v%@？", self.harnessLatestVersion];
+    confirmation.informativeText = @"升级会暂时停止 com.dsh.web，使用 npm 更新 ~/.dsh/runtime，然后重新加载服务。建议先关闭正在进行的任务。";
+    [confirmation addButtonWithTitle:@"升级"];
+    [confirmation addButtonWithTitle:@"取消"];
+    if ([confirmation runModal] != NSAlertFirstButtonReturn) return;
+
+    NSString *npm = [self npmExecutable];
+    if (!npm) {
+        [self showAlert:@"无法升级 Harness" message:@"没有找到 npm。" style:NSAlertStyleWarning];
+        return;
+    }
+    self.checkHarnessUpdateItem.enabled = NO;
+    self.updateHarnessItem.enabled = NO;
+    self.updateHarnessItem.title = @"正在升级 DeepSeek Harness…";
+    NSString *runtime = [DSHHarnessRuntimeDirectory stringByExpandingTildeInPath];
+    NSString *target = [NSString stringWithFormat:@"%@@latest", DSHHarnessPackage];
+    NSDictionary *environment = [self npmEnvironment];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        DSHCommandResult *bootout = DSHRunCommand(@"/bin/launchctl", @[@"bootout", [NSString stringWithFormat:@"gui/%u/%@", getuid(), DSHServiceLabel]]);
+        (void)bootout;
+        DSHCommandResult *install = DSHRunCommandWithEnvironment(npm, @[@"install", @"--prefix", runtime, target, @"--no-audit", @"--no-fund", @"--update-notifier=false"], environment);
+        NSError *error = nil;
+        if (install.status != 0) {
+            NSString *message = install.error.length > 0 ? install.error : install.output;
+            error = [NSError errorWithDomain:@"DeepSeekHarnessMenuBar" code:install.status userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"npm 升级失败：%@", message ?: @"未知错误"]}];
+        }
+        if (!error) {
+            NSString *plist = [@"~/Library/LaunchAgents/com.dsh.web.plist" stringByExpandingTildeInPath];
+            DSHCommandResult *bootstrap = DSHRunCommand(@"/bin/launchctl", @[@"bootstrap", [NSString stringWithFormat:@"gui/%u", getuid()], plist]);
+            if (bootstrap.status != 0) {
+                error = [NSError errorWithDomain:@"DeepSeekHarnessMenuBar" code:bootstrap.status userInfo:@{NSLocalizedDescriptionKey: bootstrap.error.length > 0 ? bootstrap.error : @"Harness 更新后无法重新加载 launchd 服务"}];
+            }
+        } else {
+            NSString *plist = [@"~/Library/LaunchAgents/com.dsh.web.plist" stringByExpandingTildeInPath];
+            DSHRunCommand(@"/bin/launchctl", @[@"bootstrap", [NSString stringWithFormat:@"gui/%u", getuid()], plist]);
+        }
+        NSString *installedVersion = [self installedHarnessVersion] ?: @"未知";
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.checkHarnessUpdateItem.enabled = YES;
+            if (error) {
+                self.updateHarnessItem.title = [NSString stringWithFormat:@"更新 DeepSeek Harness 到 v%@", self.harnessLatestVersion];
+                self.updateHarnessItem.enabled = YES;
+                [self showAlert:@"Harness 更新失败" message:error.localizedDescription style:NSAlertStyleWarning];
+            } else {
+                self.harnessCurrentVersion = installedVersion;
+                self.harnessLatestVersion = nil;
+                self.checkHarnessUpdateItem.title = [NSString stringWithFormat:@"检查 Harness 更新（当前 %@）", installedVersion];
+                self.updateHarnessItem.title = @"Harness 已是最新版本";
+                self.updateHarnessItem.enabled = NO;
+                [self showAlert:@"Harness 更新完成" message:[NSString stringWithFormat:@"DeepSeek Harness 已更新到 %@，服务正在重新启动。", installedVersion] style:NSAlertStyleInformational];
+                [self refresh];
+            }
+        });
+    });
 }
 
 - (void)updateApplication:(id)sender {

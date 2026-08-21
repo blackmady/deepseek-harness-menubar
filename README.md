@@ -40,6 +40,19 @@ bash package-release.sh 1.1.0
 
 应用会优先寻找名称中包含 `DeepSeekHarnessMenuBar` 的 ZIP，下载后校验 Bundle ID、版本号、可执行文件和代码签名，再替换当前应用并自动重新打开。服务本身和 `com.dsh.web` LaunchAgent 不会被修改。
 
+## 检查和升级 DeepSeek Harness
+
+菜单中另有一组独立的 Harness 更新操作。它们更新的是本机 `@deepseek-ai/dsh`，不是菜单栏控制器本身：
+
+1. 点击“检查 Harness 更新”
+2. 应用读取 `~/.dsh/runtime/node_modules/@deepseek-ai/dsh/package.json` 的当前版本
+3. 使用 npm 查询 `@deepseek-ai/dsh` 最新版本
+4. 点击“更新 DeepSeek Harness 到 vX.Y.Z”并确认
+5. 临时卸载 `com.dsh.web`
+6. 执行 npm 安装并重新加载 LaunchAgent
+
+升级使用当前用户的 npm 配置，因此会沿用 `npm config get registry` 设置的镜像。应用也会读取 macOS 系统代理/PAC 设置，并将解析出的 HTTP/SOCKS 代理传给 npm。升级过程中建议先关闭正在进行的 Harness 任务。
+
 前提是已经运行过 deepseek-harness 仓库里的 `install-dsh-service.sh`，生成 `~/Library/LaunchAgents/com.dsh.web.plist`。如果尚未安装，菜单仍会显示“未安装 LaunchAgent”，不会执行危险的猜测命令。
 
 <img width="193" height="251" alt="deepseek-harness-menubar" src="https://github.com/user-attachments/assets/3a4d36f0-97c0-44cd-b822-0088d2d95eb8" />
